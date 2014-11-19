@@ -54,11 +54,15 @@ def install_epel():
     print (green("=================================================="))
 
 
+#===============================================================================
+#install Development tools and nginx
 def install_req():
     sudo('yum groupinstall -y "Development tools" ; true')
     package_ensure_yum('nginx')
 
 
+#==============================================================================
+#install jdk
 def install_java():
     java_link = 'http://www.reucon.com/cdn/java/jdk-7u51-linux-x64.tar.gz'
     sudo('wget -O /tmp/jdk-7u51-linux-x64.tar.gz %s' % java_link)
