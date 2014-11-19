@@ -1,7 +1,7 @@
 __author__ = 'vmintam'
 from cuisine import user_ensure, dir_exists, dir_ensure, mode_sudo, dir_remove
 from cuisine import user_remove, user_check, file_write, package_ensure_yum
-from cuisine import package_clean_yum, package_update_yum
+from cuisine import package_clean_yum, package_update_yum, file_append
 from fabric.api import env, hide, sudo, run
 from fabric.colors import red, green
 from fabric.decorators import with_settings
@@ -10,8 +10,8 @@ env.hosts = ['192.168.1.81']
 SUDO_USER = 'vmintam'
 SUDO_PASS = '13119685'
 YOUTRACK_USER = 'youtrack'
-YOUTRACK_LINK = 'http://download.jetbrains.com/charisma/youtrack-6.0.12124.jar'
-YOUTRACK_NAME = "youtrack-6.0.12124.jar"
+YOUTRACK_LINK = 'http://download.jetbrains.com/charisma/youtrack-6.0.12223.jar'
+YOUTRACK_NAME = "youtrack-6.0.12223.jar"
 WORKING_DIR = "/usr/local/youtrack"
 
 
@@ -20,7 +20,7 @@ def user_setup(user):
     with mode_sudo():
         if user_check(user):
             user_remove(user, rmhome='/home/%s' % user)
-        user_ensure(user, home="/home/%s" % user, shell="/sbin/nologin")
+        user_ensure(user, home="/home/%s" % user)
 
     print (green("=================================================="))
     print(red('created %s user' % user))
@@ -45,7 +45,7 @@ def working_dir():
 #===============================================================================
 #install epel repository
 def install_epel():
-    epel_link = """http://dl.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm"""
+    epel_link = 'http://dl.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm'
     sudo('rpm -Uvh %s' % epel_link)
     package_clean_yum()
     package_update_yum()
@@ -62,8 +62,10 @@ def install_req():
 def install_java():
     java_link = 'http://www.reucon.com/cdn/java/jdk-7u51-linux-x64.tar.gz'
     sudo('wget -O /tmp/jdk-7u51-linux-x64.tar.gz %s' % java_link)
+    with mode_sudo():
+        if dir_exists('/home/youtrack/jdk1.7.0_51'):
+            dir_remove('/home/youtrack/jdk1.7.0_51')
     sudo('tar -xvzf /tmp/jdk-7u51-linux-x64.tar.gz -C /home/youtrack')
-
 
 
 def write_daemon():
@@ -85,7 +87,7 @@ set -e
 
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 NAME=youtrack
-SCRIPT=/usr/local/$NAME/$NAME.sh
+SCRIPT=/usr/local/$NAME/$NAME
 
 d_start() {
     su youtrack -l -c "$SCRIPT start"
@@ -133,7 +135,8 @@ export JAVA_HOME=/home/youtrack/jdk1.7.0_51
 NAME=youtrack
 PORT=8112
 USR=/usr/local/$NAME
-JAR=$USR/`ls -Lt $USR/*.jar | grep -o "$NAME-[^/]*.jar" | head -1`
+#JAR=$USR/`ls -Lt $USR/*.jar | grep -o "$NAME-[^/]*.jar" | head -1`
+JAR="$USR/youtrack-6.0.12223.jar"
 LOG=$USR/$NAME-$PORT.log
 PID=$USR/$NAME-$PORT.pid
 
@@ -141,16 +144,16 @@ d_start() {
     if [ -f $PID ]; then
         PID_VALUE=`cat $PID`
         if [ ! -z "$PID_VALUE" ]; then
-            PID_VALUE=`ps ax | grep $PID_VALUE | grep -v grep | awk '{print $1}'`
-            if [ ! -z "$PID_VALUE" ]; then
+          PID_VALUE=`ps ax | grep $PID_VALUE | grep -v grep | awk '{print $1}'`
+          if [ ! -z "$PID_VALUE" ]; then
                 exit 1;
-            fi
+          fi
         fi
     fi
 
     PREV_DIR=`pwd`
     cd $USR
-    exec $JAVA_HOME/bin/java -Xmx1024m -jar $JAR $PORT >> $LOG 2>&1 &
+    exec $JAVA_HOME/bin/java -Xmx1g -XX:MaxPermSize=256m  -Djava.awt.headless=true -jar $JAR $PORT >> $LOG 2>&1 &
     echo $! > $PID
     cd $PREV_DIR
 }
@@ -214,10 +217,61 @@ def get_youtrack():
                                 WORKING_DIR, YOUTRACK_NAME))
 
 
-# @with_settings(hide('running', 'commands', 'stdout', 'stderr'))
+def nginx_config():
+    youtrack_site = '/etc/nginx/sites/youtrack.conf'
+    upstream_content = """
+    upstream youtrack {
+    server 127.0.0.1:8112;
+    }
+    """
+    youtrack_content = """
+    server {
+        listen 80;
+        server_name youtrack.vnpid.com;
+        access_log  /var/log/nginx/youtrack.vnpid.log;
+	    keepalive_timeout 600s;
+	    send_timeout 600s;
+        location / {
+	        client_max_body_size 100M;
+            proxy_pass              http://youtrack;
+	        proxy_set_header 	    X-Forwarded-Host $http_host;
+            proxy_set_header        X-Real-IP $remote_addr;
+	        proxy_set_header 	    X-Forwarded-Proto $scheme;
+            proxy_set_header        Host $http_host;
+            proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_connect_timeout   600;
+            proxy_read_timeout      600;
+            proxy_send_timeout      600;
+        }
+    }
+    """
+    check_yt = run('cat /etc/nginx/conf.d/upstreams.conf | grep youtrack; true')
+    with mode_sudo():
+        file_write(youtrack_site, youtrack_content)
+        if check_yt.find('youtrack') == -1:
+            file_append('/etc/nginx/conf.d/upstreams.conf', upstream_content)
+    sudo('/etc/init.d/nginx restart')
+
+
+def start_youtrack():
+    sudo('/etc/init.d/youtrack restart')
+
+
+def iptable_stop():
+    sudo('/etc/init.d/iptables stop')
+
+
+def disable_selinux():
+    pass
+    # command = run('cat /etc/selinux/config | grep "SELINUX=disabled"')
+
+
+@with_settings(hide('running', 'commands', 'stdout', 'stderr'))
 def deploy():
     env.user = SUDO_USER
     env.password = SUDO_PASS
+    iptable_stop()
+    disable_selinux()
     user_setup(YOUTRACK_USER)
     working_dir()
     if sudo('ls -laht /etc/yum.repos.d/ | grep epel ; true').find('epel') != -1:
@@ -229,3 +283,5 @@ def deploy():
     install_java()
     write_daemon()
     write_command_run()
+    nginx_config()
+    start_youtrack()
